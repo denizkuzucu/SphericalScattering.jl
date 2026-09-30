@@ -45,6 +45,7 @@ export SphericalMode, SphericalModeTE, SphericalModeTM
 export PECSphere, DielectricSphere, LayeredSphere, LayeredSpherePEC
 export DielectricSphereThinImpedanceLayer
 export field, scatteredfield
+export totalfield, layerCoefficients, layerCoefficientCache
 export rcs
 export sphericalGridPoints, phiCutPoints, thetaCutPoints
 export numlayers, layer
@@ -75,6 +76,7 @@ include("dipoles/scattered.jl")
 include("planeWave/excitation.jl")
 include("planeWave/incident.jl")
 include("planeWave/scattered.jl")
+include("planeWave/scatteredLayeredInterior.jl")
 
 include("sphericalModes/excitation.jl")
 include("sphericalModes/incident.jl")

@@ -109,6 +109,23 @@ function inside(sphere::DielectricSphere, excitation::PlaneWave{T,R,C}, point, q
     return SVector{3,Complex{R}}(0.0, 0.0, 0.0)
 end
 
+function inside(sphere::LayeredSphere, excitation::PlaneWave{T,R,C}, point, quantity::FarField; parameter) where {T,R,C}
+
+    return SVector{3,Complex{R}}(0.0, 0.0, 0.0) # no correction needed
+end
+
+function inside(sphere::LayeredSphere, excitation::PlaneWave{T,R,C}, point, quantity::Field; parameter) where {T,R,C}
+
+    # `scatterCoeff(::LayeredSphere, ...)` only provides the exterior coefficients, so the
+    # Mie loop silently evaluates to zero inside.
+    norm(point) < sphere.radii[end] && error(
+        "The field inside a `LayeredSphere` is not implemented for a plane-wave excitation; " *
+        "only points with r >= radii[end] = $(sphere.radii[end]) are supported.",
+    )
+
+    return SVector{3,Complex{R}}(0.0, 0.0, 0.0)
+end
+
 
 
 function Δfieldₙ(sphere, excitation::PlaneWave, quantity::ElectricField, r, coeffs, expansion, sinϕ, cosϕ, n)
@@ -324,6 +341,115 @@ end
 
 
 """
+    riccatiBessel(z, n::Int, ::Type{T})
+
+Riccati-Bessel function ``Ĵₙ(z) = z jₙ(z)`` and its derivative with respect to `z`,
+using the recurrence ``Ĵₙ'(z) = Ĵₙ₋₁(z) - (n/z) Ĵₙ(z)``.
+"""
+function riccatiBessel(z, n::Int, ::Type{T}) where {T}
+    s = sqrt(π / 2 / z)
+
+    f  = z * s * besselj(n + T(0.5), z)
+    f₋ = z * s * besselj(n - T(0.5), z)
+
+    return f, f₋ - n / z * f
+end
+
+"""
+    riccatiHankel2(z, n::Int, ::Type{T})
+
+Riccati-Hankel function of the second kind ``Ĥₙ⁽²⁾(z) = z hₙ⁽²⁾(z)`` and its derivative.
+"""
+function riccatiHankel2(z, n::Int, ::Type{T}) where {T}
+    s = sqrt(π / 2 / z)
+
+    f  = z * s * hankelh2(n + T(0.5), z)
+    f₋ = z * s * hankelh2(n - T(0.5), z)
+
+    return f, f₋ - n / z * f
+end
+
+"""
+    rescale(p)
+
+Rescale a `(numerator, denominator)` pair so that the larger component has unit magnitude.
+The represented ratio is unchanged; this keeps both components in a sane numerical range
+while they are propagated outward through many layers.
+"""
+function rescale(p)
+    s = max(abs(p[1]), abs(p[2]))
+
+    iszero(s) && return p
+
+    if !isfinite(s)
+        isfinite(p[1]) && return (zero(p[1]), one(p[2]))  # ratio → 0
+        isfinite(p[2]) && return (one(p[1]), zero(p[2]))  # ratio → ∞
+        return p
+    end
+
+    return (p[1] / s, p[2] / s)
+end
+
+
+
+"""
+    scatterCoeff(sphere::LayeredSphere, excitation::PlaneWave, n::Int)
+
+"""
+function scatterCoeff(sphere::LayeredSphere{N,R,C}, excitation::PlaneWave, n::Int) where {N,R,C}
+
+    T = typeof(excitation.frequency)
+
+    ω = 2π * excitation.frequency
+
+    CT = promote_type(C, typeof(excitation.embedding.ε), typeof(excitation.embedding.μ), Complex{T})
+
+    # media of the N shells (inner → outer), the background is appended as layer N+1
+    ε = SVector{N + 1,CT}(ntuple(i -> i <= N ? sphere.filling[i].ε : excitation.embedding.ε, N + 1))
+    μ = SVector{N + 1,CT}(ntuple(i -> i <= N ? sphere.filling[i].μ : excitation.embedding.μ, N + 1))
+
+    k = ω .* sqrt.(ε .* μ)
+
+    # starting values, the innermost layer is uniform, so it holds Ĵₙ alone and is
+    # regular at the origin. Jin (7.4.87) in the Ĵₙ, Ĥₙ⁽²⁾ basis.
+    σH = (zero(CT), one(CT))  # TM, from Aᵣ
+    σE = (zero(CT), one(CT))  # TE, from Fᵣ
+
+    for i in 1:N
+        a = sphere.radii[i]
+
+        # ratio inside the interface, being referred to the medium outside
+        Ĵ, dĴ = riccatiBessel(k[i] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i] * a, n, T)
+
+        S = sqrt(μ[i + 1] * ε[i] / (ε[i + 1] * μ[i]))
+
+        RH = rescale((S * (σH[2] * Ĵ + σH[1] * Ĥ), σH[2] * dĴ + σH[1] * dĤ))  # Jin (7.4.83)
+        RE = rescale(((σE[2] * Ĵ + σE[1] * Ĥ) / S, σE[2] * dĴ + σE[1] * dĤ))  # Jin (7.4.84)
+
+        # same ratio but outside, fixes the amplitudes of layer i+1
+        Ĵ, dĴ = riccatiBessel(k[i + 1] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i + 1] * a, n, T)
+
+        σH = rescale((RH[1] * dĴ - RH[2] * Ĵ, RH[2] * Ĥ - RH[1] * dĤ))  # Jin (7.4.85)
+        σE = rescale((RE[1] * dĴ - RE[2] * Ĵ, RE[2] * Ĥ - RE[1] * dĤ))  # Jin (7.4.86)
+    end
+
+    pF = im^(-T(n)) * (2 * n + 1) / (n * (n + 1))
+
+    aₙ = pF * σH[1] / σH[2]  # Jin (7.4.92)
+    bₙ = pF * σE[1] / σE[2]  # Jin (7.4.93)
+
+    # Keep the tuple length at 2 * numlayers so that `scatterCoeff_of_layer` keeps working.
+    # The interior coefficients are not evaluated -- see the note in the docstring.
+    z = zero(aₙ)
+
+    return (aₙ, bₙ, ntuple(i -> z, Val(2 * N))...)
+end
+
+
+
+"""
     expansion(sphere::Sphere, excitation::PlaneWave, quantity::Field, r, plm, cosϑ, sinϑ, n::Int) 
 
 Compute functional dependencies of the Mie series for a plane wave
@@ -341,7 +467,7 @@ function expansion(sphere::Sphere, excitation::PlaneWave, quantity::Field, r, pl
         kr = k * r
         s = sqrt(π / 2 / kr)
 
-        if r >= sphere.radius
+        if r >= outerradius(sphere)
             B  = kr * s * hankelh2(n + T(0.5), kr)     # Riccati-Hankel function
             B2 = kr * s * hankelh2(n - T(0.5), kr)
         else

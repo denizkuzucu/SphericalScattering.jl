@@ -162,6 +162,16 @@ function numlayers(sp::Union{LayeredSphere,LayeredSpherePEC})
 end
 
 
+"""
+    outerradius(sp::Sphere)
+
+Returns the radius of the outermost material boundary of the sphere.
+"""
+outerradius(sp::Sphere) = sp.radius
+
+outerradius(sp::Union{LayeredSphere,LayeredSpherePEC}) = sp.radii[end]
+
+
 
 """
     layer(sp::Sphere, r)
@@ -275,6 +285,25 @@ function impedance(sp::PECSphere, ex::Excitation, r)
 
     return sqrt(μ / ε)
 end
+
+function wavenumber(sp::Union{LayeredSphere,LayeredSpherePEC}, ex::Excitation, r)
+    md = medium(sp, ex, r)
+
+    c = 1 / sqrt(md.ε * md.μ)
+    k = 2π * ex.frequency / c
+
+    return k
+end
+
+function impedance(sp::Union{LayeredSphere,LayeredSpherePEC}, ex::Excitation, r)
+    md = medium(sp, ex, r)
+
+    md.ε == 0.0 && return md.ε #return zero of correct type
+
+    return sqrt(md.μ / md.ε)
+end
+
+
 
 function medium(sp::LayeredSphere, ex::Excitation, r)
     N = numlayers(sp) # Number of interior layers
