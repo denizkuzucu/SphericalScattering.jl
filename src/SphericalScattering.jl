@@ -59,6 +59,8 @@ export Spheroid, OblateSpheroid, ProlateSpheroid, Disc
 export outwardNormal, outwardNormals
 export equatorialRadius, polarRadius, isdisc
 export field, scatteredfield
+export totalfield, layerCoefficients, layerCoefficientCache
+export totalfieldRescaled, rescaledLayerCoefficients
 export rcs
 export sphericalGridPoints, phiCutPoints, thetaCutPoints
 export numlayers, layer
@@ -98,6 +100,7 @@ include("electromagnetics/dipoles/scattered.jl")
 include("electromagnetics/planeWave/excitation.jl")
 include("electromagnetics/planeWave/incident.jl")
 include("electromagnetics/planeWave/scattered.jl")
+include("electromagnetics/planeWave/scatteredLayeredRescaled.jl")
 
 include("electromagnetics/sphericalModes/excitation.jl")
 include("electromagnetics/sphericalModes/incident.jl")

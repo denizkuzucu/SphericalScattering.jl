@@ -295,6 +295,34 @@ function impedance(sp::Sphere{PEC}, ex::Excitation, r)
     return sqrt(μ / ε)
 end
 
+"""
+    wavenumber(sp::Sphere{<:Layered}, ex::Excitation, r)
+
+Returns the wavenumber at radius `r` in the layered sphere `sp`.
+"""
+function wavenumber(sp::Sphere{<:Layered}, ex::Excitation, r)
+    md = medium(sp, ex, r)
+
+    c = 1 / sqrt(md.ε * md.μ)
+    k = 2π * ex.frequency / c
+
+    return k
+end
+
+"""
+    impedance(sp::Sphere{<:Layered}, ex::Excitation, r)
+
+Returns the impedance at radius `r` in the layered sphere `sp`.
+If this part is PEC, zero is returned.
+"""
+function impedance(sp::Sphere{<:Layered}, ex::Excitation, r)
+    md = medium(sp, ex, r)
+
+    md.ε == 0.0 && return md.ε # return zero of correct type
+
+    return sqrt(md.μ / md.ε)
+end
+
 function medium(sp::Sphere{<:Layered{<:Dielectric}}, ex::Excitation, r)
     N = numlayers(sp) # Number of interior layers
 

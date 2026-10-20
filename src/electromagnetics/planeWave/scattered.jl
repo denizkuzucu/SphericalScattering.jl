@@ -117,6 +117,25 @@ end
 
 
 
+function inside(sphere::LayeredSphere, excitation::PlaneWave{T,R,C}, point, quantity::FarField; parameter) where {T,R,C}
+
+    return SVector{3,Complex{R}}(0.0, 0.0, 0.0) # no correction needed
+end
+
+function inside(sphere::LayeredSphere, excitation::PlaneWave{T,R,C}, point, quantity::Field; parameter) where {T,R,C}
+
+    # `scatterCoeff(::LayeredSphere, ...)` only provides the exterior coefficients, so the
+    # Mie loop silently evaluates to zero inside.
+    norm(point) < sphere.radius && error(
+        "The scattered field inside a `LayeredSphere` is not implemented for a plane-wave excitation; " *
+        "only points with r >= $(sphere.radius) are supported. Use `totalfield` for the field inside.",
+    )
+
+    return SVector{3,Complex{R}}(0.0, 0.0, 0.0)
+end
+
+
+
 function Δfieldₙ(sphere, excitation::PlaneWave, quantity::ElectricField, r, coeffs, expansion, sinϕ, cosϕ, n)
 
     (Nn_r, Nn_ϑ, Nn_ϕ, Mn_ϑ, Mn_ϕ) = expansion
@@ -325,6 +344,381 @@ function scatterCoeff(sphere::Sphere{<:Dielectric}, excitation::PlaneWave, n::In
     dₙ = pF * (im * √εᵣ * μᵣ) / (√εᵣ * Ĥ₂ * dĴ₁ - √μᵣ * dĤ₂ * Ĵ₁)      # Jin (7.4.66)
 
     return aₙ, bₙ, cₙ, dₙ
+end
+
+
+
+"""
+    riccatiBessel(z, n::Int, ::Type{T})
+
+Riccati-Bessel function ``Ĵₙ(z) = z jₙ(z)`` and its derivative with respect to `z`,
+using the recurrence ``Ĵₙ'(z) = Ĵₙ₋₁(z) - (n/z) Ĵₙ(z)``.
+"""
+function riccatiBessel(z, n::Int, ::Type{T}) where {T}
+    s = sqrt(π / 2 / z)
+
+    f  = z * s * besselj(n + T(0.5), z)
+    f₋ = z * s * besselj(n - T(0.5), z)
+
+    return f, f₋ - n / z * f
+end
+
+"""
+    riccatiHankel2(z, n::Int, ::Type{T})
+
+Riccati-Hankel function of the second kind ``Ĥₙ⁽²⁾(z) = z hₙ⁽²⁾(z)`` and its derivative.
+"""
+function riccatiHankel2(z, n::Int, ::Type{T}) where {T}
+    s = sqrt(π / 2 / z)
+
+    f  = z * s * hankelh2(n + T(0.5), z)
+    f₋ = z * s * hankelh2(n - T(0.5), z)
+
+    return f, f₋ - n / z * f
+end
+
+"""
+    rescale(p)
+
+Rescale a `(numerator, denominator)` pair so that the larger component has unit magnitude.
+The represented ratio is unchanged; this keeps both components in a sane numerical range
+while they are propagated outward through many layers.
+"""
+function rescale(p)
+    s = max(abs(p[1]), abs(p[2]))
+
+    iszero(s) && return p
+
+    if !isfinite(s)
+        isfinite(p[1]) && return (zero(p[1]), one(p[2]))  # ratio → 0
+        isfinite(p[2]) && return (one(p[1]), zero(p[2]))  # ratio → ∞
+        return p
+    end
+
+    return (p[1] / s, p[2] / s)
+end
+
+
+
+"""
+    scatterCoeff(sphere::LayeredSphere, excitation::PlaneWave, n::Int)
+
+Compute scattering coefficients of a layered dielectric sphere for a plane wave travelling in +z-direction
+with polarization in x-direction. Only the coefficients of the exterior are evaluated; for the fields inside
+see [`totalfield`](@ref).
+"""
+function scatterCoeff(sphere::Sphere{<:Layered{<:Dielectric,M}}, excitation::PlaneWave, n::Int) where {M}
+
+    T = typeof(excitation.frequency)
+
+    ω = 2π * excitation.frequency
+
+    N = M + 1 # number of dielectric layers: the core and the M shells
+
+    radii = layerRadii(sphere)
+    fillings = layerFillings(sphere)
+
+    CT = promote_type(Complex{T}, typeof(excitation.embedding.ε), typeof(first(fillings).ε), typeof(last(fillings).ε))
+
+    # media of the N shells (inner → outer), the background is appended as layer N+1
+    ε = SVector{N + 1,CT}(ntuple(i -> i <= N ? fillings[i].ε : excitation.embedding.ε, N + 1))
+    μ = SVector{N + 1,CT}(ntuple(i -> i <= N ? fillings[i].μ : excitation.embedding.μ, N + 1))
+
+    k = ω .* sqrt.(ε .* μ)
+
+    # starting values, the innermost layer is uniform, so it holds Ĵₙ alone and is
+    # regular at the origin. Jin (7.4.87) in the Ĵₙ, Ĥₙ⁽²⁾ basis.
+    σH = (zero(CT), one(CT))  # TM, from Aᵣ
+    σE = (zero(CT), one(CT))  # TE, from Fᵣ
+
+    for i in 1:N
+        a = radii[i]
+
+        # ratio inside the interface, being referred to the medium outside
+        Ĵ, dĴ = riccatiBessel(k[i] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i] * a, n, T)
+
+        S = sqrt(μ[i + 1] * ε[i] / (ε[i + 1] * μ[i]))
+
+        RH = rescale((S * (σH[2] * Ĵ + σH[1] * Ĥ), σH[2] * dĴ + σH[1] * dĤ))  # Jin (7.4.83)
+        RE = rescale(((σE[2] * Ĵ + σE[1] * Ĥ) / S, σE[2] * dĴ + σE[1] * dĤ))  # Jin (7.4.84)
+
+        # same ratio but outside, fixes the amplitudes of layer i+1
+        Ĵ, dĴ = riccatiBessel(k[i + 1] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i + 1] * a, n, T)
+
+        σH = rescale((RH[1] * dĴ - RH[2] * Ĵ, RH[2] * Ĥ - RH[1] * dĤ))  # Jin (7.4.85)
+        σE = rescale((RE[1] * dĴ - RE[2] * Ĵ, RE[2] * Ĥ - RE[1] * dĤ))  # Jin (7.4.86)
+    end
+
+    pF = im^(-T(n)) * (2 * n + 1) / (n * (n + 1))
+
+    aₙ = pF * σH[1] / σH[2]  # Jin (7.4.92)
+    bₙ = pF * σE[1] / σE[2]  # Jin (7.4.93)
+
+    # Keep the tuple length at 2 * numlayers so that `scatterCoeff_of_layer` keeps working.
+    # The interior coefficients are not evaluated -- see the note in the docstring.
+    z = zero(aₙ)
+
+    return (aₙ, bₙ, ntuple(i -> z, Val(2 * N))...)
+end
+
+
+
+# =====================================================================================
+#  Fields inside a multilayer dielectric sphere under a plane wave: the expansion
+#  coefficients of every layer and the total field at any radius.
+#
+#  Representation used in layer `i` (i = 1 … N shells, i = N+1 the background), with
+#  x = kᵢr and U(x) = Ĵₙ(x) + σ Ĥₙ⁽²⁾(x):
+#
+#      Aᵣ⁽ⁱ⁾ = (E₀cosφ/ω)   Σₙ αᵢ U_A(kᵢr) Pₙ¹(cosϑ)        TM
+#      Fᵣ⁽ⁱ⁾ = (E₀sinφ/ω)   Σₙ βᵢ U_F(kᵢr) Pₙ¹(cosϑ)        TE
+#
+#  The core holds Ĵₙ alone (σ⁽¹⁾ = 0, regular at the origin); the background is incident
+#  plus scattered, so α⁽ᴺ⁺¹⁾ = pₙ, σH⁽ᴺ⁺¹⁾ = aₙ/pₙ and β⁽ᴺ⁺¹⁾ = pₙ/η.
+#
+#  Continuity of the tangential fields at r = aᵢ, Jin (7.4.79)-(7.4.82), reads
+#
+#      U_A⁽ⁱ⁾/μᵢ = U_A⁽ⁱ⁺¹⁾/μᵢ₊₁      U_A⁽ⁱ⁾′/kᵢ = U_A⁽ⁱ⁺¹⁾′/kᵢ₊₁      (TM)
+#      U_F⁽ⁱ⁾/εᵢ = U_F⁽ⁱ⁺¹⁾/εᵢ₊₁      U_F⁽ⁱ⁾′/kᵢ = U_F⁽ⁱ⁺¹⁾′/kᵢ₊₁      (TE)
+#
+#  The outward pass fixes every σ through the derivative conditions; the value conditions
+#  then give the amplitudes directly, which is the downward pass implemented here.
+#
+#  The field evaluation cannot reuse `expansion`: that routine selects EITHER Ĵₙ (inside)
+#  OR Ĥₙ⁽²⁾ (outside) by radius, whereas a shell needs both at once.
+# =====================================================================================
+
+
+"""
+    LayerCoefficients
+
+Expansion coefficients of one order `n` in every layer of a [`LayeredSphere`](@ref).
+Index `i` runs `1 … N+1`, where `N+1` denotes the background.
+
+`σH`, `σE` are the ratios of the ``Ĥₙ⁽²⁾`` to the ``Ĵₙ`` coefficient (TM and TE); `α`, `β`
+are the absolute amplitudes of the TM and TE radial functions.
+"""
+struct LayerCoefficients{C}
+    α::Vector{C}
+    σH::Vector{C}
+    β::Vector{C}
+    σE::Vector{C}
+    k::Vector{C}
+    ε::Vector{C}
+    μ::Vector{C}
+end
+
+
+"""
+    layerCoefficients(sphere::LayeredSphere, excitation::PlaneWave, n::Int)
+
+Coefficients of order `n` in every layer: the outward pass of Jin (7.4.83)-(7.4.86)
+keeping each ratio, followed by the downward pass that turns those ratios into amplitudes.
+
+Returns a [`LayerCoefficients`](@ref).
+"""
+function layerCoefficients(sphere::LayeredSphere, excitation::PlaneWave, n::Int)
+
+    T = typeof(excitation.frequency)
+    ω = 2π * excitation.frequency
+
+    radii = layerRadii(sphere)
+    fillings = layerFillings(sphere)
+
+    N = length(radii) # number of dielectric layers: the core and the shells
+
+    CT = promote_type(Complex{T}, typeof(excitation.embedding.ε), typeof(first(fillings).ε), typeof(last(fillings).ε))
+
+    ε = CT[i <= N ? fillings[i].ε : excitation.embedding.ε for i in 1:(N + 1)]
+    μ = CT[i <= N ? fillings[i].μ : excitation.embedding.μ for i in 1:(N + 1)]
+    k = CT[ω * sqrt(ε[i] * μ[i]) for i in 1:(N + 1)]
+
+    # --- outward pass: the ratios, as in scatterCoeff(::LayeredSphere, ...) but all kept
+    σH = zeros(CT, N + 1)
+    σE = zeros(CT, N + 1)          # σ⁽¹⁾ = 0: the core holds Ĵₙ alone
+
+    for i in 1:N
+        a = radii[i]
+
+        Ĵ, dĴ = riccatiBessel(k[i] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i] * a, n, T)
+
+        S = sqrt(μ[i + 1] * ε[i] / (ε[i + 1] * μ[i]))
+
+        RH = S * (Ĵ + σH[i] * Ĥ) / (dĴ + σH[i] * dĤ)      # Jin (7.4.83)
+        RE = (Ĵ + σE[i] * Ĥ) / (dĴ + σE[i] * dĤ) / S      # Jin (7.4.84)
+
+        Ĵ, dĴ = riccatiBessel(k[i + 1] * a, n, T)
+        Ĥ, dĤ = riccatiHankel2(k[i + 1] * a, n, T)
+
+        σH[i + 1] = (RH * dĴ - Ĵ) / (Ĥ - RH * dĤ)         # Jin (7.4.85)
+        σE[i + 1] = (RE * dĴ - Ĵ) / (Ĥ - RE * dĤ)         # Jin (7.4.86)
+    end
+
+    # --- downward pass: the amplitudes, from the value conditions
+    pF = im^(-T(n)) * (2 * n + 1) / (n * (n + 1))
+    η = sqrt(μ[N + 1] / ε[N + 1])
+
+    α = zeros(CT, N + 1)
+    β = zeros(CT, N + 1)
+
+    α[N + 1] = pF                  # the incident Ĵₙ carries pₙ, the scattered Ĥₙ⁽²⁾ carries aₙ
+    β[N + 1] = pF / η              # Fᵣ is written with H₀ = E₀/η
+
+    for i in N:-1:1
+        a = radii[i]
+
+        Ĵo, _ = riccatiBessel(k[i + 1] * a, n, T)
+        Ĥo, _ = riccatiHankel2(k[i + 1] * a, n, T)
+        Ĵi, _ = riccatiBessel(k[i] * a, n, T)
+        Ĥi, _ = riccatiHankel2(k[i] * a, n, T)
+
+        α[i] = (μ[i] / μ[i + 1]) * α[i + 1] * (Ĵo + σH[i + 1] * Ĥo) / (Ĵi + σH[i] * Ĥi)
+        β[i] = (ε[i] / ε[i + 1]) * β[i + 1] * (Ĵo + σE[i + 1] * Ĥo) / (Ĵi + σE[i] * Ĥi)
+    end
+
+    return LayerCoefficients{CT}(α, σH, β, σE, k, ε, μ)
+end
+
+
+"""
+    layerCoefficientCache(sphere::LayeredSphere, excitation::PlaneWave, nmax::Int)
+
+[`layerCoefficients`](@ref) for the orders `1:nmax`. The coefficients do not depend on the
+observation point, so passing this as `coefficients` to [`totalfield`](@ref) avoids
+repeating the recursion at every point.
+"""
+function layerCoefficientCache(sphere::LayeredSphere, excitation::PlaneWave, nmax::Int)
+    return [layerCoefficients(sphere, excitation, n) for n in 1:nmax]
+end
+
+
+"""
+    layerRadialFunctions(c::LayerCoefficients, i, r, n, ::Type{T})
+
+``U_A``, ``U_A′``, ``U_F``, ``U_F′`` of layer `i` at radius `r`, derivatives taken with
+respect to ``kᵢr``.
+"""
+function layerRadialFunctions(c::LayerCoefficients, i::Int, r, n::Int, ::Type{T}) where {T}
+
+    x = c.k[i] * r
+
+    Ĵ, dĴ = riccatiBessel(x, n, T)
+    Ĥ, dĤ = riccatiHankel2(x, n, T)
+
+    U_A = c.α[i] * (Ĵ + c.σH[i] * Ĥ)
+    dU_A = c.α[i] * (dĴ + c.σH[i] * dĤ)
+
+    U_F = c.β[i] * (Ĵ + c.σE[i] * Ĥ)
+    dU_F = c.β[i] * (dĴ + c.σE[i] * dĤ)
+
+    return U_A, dU_A, U_F, dU_F
+end
+
+
+"""
+    layerAngularFunctions(n, cosϑ, sinϑ, plm)
+
+``Pₙ¹(cosϑ)``, ``πₙ = Pₙ¹/sinϑ`` and ``τₙ = dPₙ¹/dϑ``, extending the cache `plm` in place
+by the same recurrence used elsewhere in the package.
+"""
+function layerAngularFunctions(n::Int, cosϑ, sinϑ, plm::Vector{T}) where {T}
+
+    while length(plm) < n
+        m = length(plm)
+        push!(plm, ((2m + 1) * cosϑ * plm[m] - (m + 1) * plm[m - 1]) / m)
+    end
+
+    P = plm[n]
+    Pprev = n > 1 ? plm[n - 1] : zero(T)
+
+    πn = P / sinϑ
+    τn = (n * cosϑ * P - (n + 1) * Pprev) / sinϑ
+
+    return P, πn, τn
+end
+
+
+"""
+    totalfield(sphere::LayeredSphere, excitation::PlaneWave, point, quantity::Field; nmax, rtol, coefficients)
+
+Total (incident plus scattered) electric or magnetic field at `point`, valid at **any**
+radius, including inside the shells where `scatteredfield` is not available.
+
+The point and the returned field are in Cartesian coordinates.
+
+`nmax` caps the number of orders, `rtol` stops the series once the relative change falls
+below it, and `coefficients` optionally takes the result of [`layerCoefficientCache`](@ref)
+to avoid recomputing the recursion at every point.
+"""
+function totalfield(
+    sphere::LayeredSphere, excitation::PlaneWave, point::StaticVector, quantity::Field; nmax=60, rtol=1e-12, coefficients=nothing
+)
+
+    T = typeof(excitation.frequency)
+    ω = 2π * excitation.frequency
+    E₀ = excitation.amplitude
+
+    sph = cart2sph(point)
+    r, ϑ, φ = sph[1], sph[2], sph[3]
+
+    i = layer(sphere, r)
+
+    sinϑ, cosϑ = abs(sin(ϑ)), cos(ϑ)
+    sinφ, cosφ = sin(φ), cos(φ)
+
+    CT = Complex{T}
+    Fr = zero(CT)
+    Fϑ = zero(CT)
+    Fφ = zero(CT)
+
+    plm = T[-sinϑ, -3 * sinϑ * cosϑ]
+
+    δ = T(Inf)
+    n = 0
+
+    while n < nmax && (n < 10 || δ > rtol)
+        n += 1
+
+        c = coefficients === nothing ? layerCoefficients(sphere, excitation, n) : coefficients[n]
+
+        U_A, dU_A, U_F, dU_F = layerRadialFunctions(c, i, r, n, T)
+        P, πn, τn = layerAngularFunctions(n, cosϑ, sinϑ, plm)
+
+        kᵢr = c.k[i] * r
+        ωε = ω * c.ε[i]
+        ωμ = ω * c.μ[i]
+
+        if quantity isa ElectricField
+            ΔFr = E₀ * cosφ / (im * kᵢr^2) * n * (n + 1) * U_A * P
+            ΔFϑ = -E₀ * cosφ / r * (im / c.k[i] * dU_A * τn + U_F / ωε * πn)
+            ΔFφ = +E₀ * sinφ / r * (im / c.k[i] * dU_A * πn + U_F / ωε * τn)
+        else
+            ΔFr = E₀ * sinφ / (im * kᵢr^2) * n * (n + 1) * U_F * P
+            ΔFϑ = -E₀ * sinφ / r * (U_A / ωμ * πn + im / c.k[i] * dU_F * τn)
+            ΔFφ = -E₀ * cosφ / r * (U_A / ωμ * τn + im / c.k[i] * dU_F * πn)
+        end
+
+        Fr += ΔFr
+        Fϑ += ΔFϑ
+        Fφ += ΔFφ
+
+        δ = norm(SVector(ΔFr, ΔFϑ, ΔFφ)) / norm(SVector(Fr, Fϑ, Fφ))
+    end
+
+    return convertSpherical2Cartesian(SVector{3,CT}(Fr, Fϑ, Fφ), sph)
+end
+
+
+"""
+    totalfield(sphere::LayeredSphere, excitation::PlaneWave, points, quantity::Field; kwargs...)
+
+Total field at several points.
+"""
+function totalfield(sphere::LayeredSphere, excitation::PlaneWave, points::AbstractVecOrMat{<:StaticVector}, quantity::Field; kwargs...)
+    return [totalfield(sphere, excitation, p, quantity; kwargs...) for p in points]
 end
 
 
