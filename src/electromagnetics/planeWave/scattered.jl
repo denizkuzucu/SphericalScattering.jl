@@ -405,8 +405,7 @@ end
 
 
 
-# -------- layered dielectric sphere: series in rescaled quantities, following
-#          L. Guo and J. Shen, J. Quant. Spectrosc. Radiat. Transf. 250, 107004 (2020)
+#  layered dielectric sphere: series in rescaled quantities
 
 
 """
@@ -589,8 +588,7 @@ Size of the last two orders of the coefficients relative to the largest order, a
 
 The size of order n is ``n(n+1)`` times its largest amplitude in any layer and in the background, TM and TE: the
 amplitudes multiply radial functions referred to the interface where they are largest, and angular functions growing
-as ``n(n+1)/2``. Two orders are taken, as one may vanish by itself. The measure detects a truncation that is clearly
-too small; it does not guarantee the relative accuracy at every point.
+as ``n(n+1)/2``. Two orders are taken, as one may vanish by itself.
 """
 function truncationTail(coeffs::RescaledLayerCoefficients)
 
