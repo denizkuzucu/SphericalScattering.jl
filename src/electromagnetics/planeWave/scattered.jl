@@ -436,10 +436,14 @@ function riccatiLogDerivatives(z::Complex{T}, nmax::Int) where {T}
 
     D3[1] = -im
     ĴĤ[1] = -expm1(-2im * z) / 2
+    σ, Ĵ₁ˢ = riccatiBessel1Scaled(z, D1[2])
+    ĴĤ[2] = exp(im * (σ - 1) * z) * Ĵ₁ˢ * (im / z - 1)   # Ĵ₁Ĥ₁, Ĥ₁ = e^{-jz}(j/z − 1)
 
     for n in 1:nmax
-        ĴĤ[n + 1] = ĴĤ[n] * (n / z - D3[n]) / (D1[n + 1] + n / z)
-        D3[n + 1] = D1[n + 1] - im / ĴĤ[n + 1]   # from the Wronskian ĴₙĤₙ⁽²⁾′ - Ĵₙ′Ĥₙ⁽²⁾ = -j
+        n >= 2 &&(ĴĤ[n + 1] = ĴĤ[n] * (n / z - D3[n]) / (D1[n + 1] + n / z))
+        #if ka has a positive imaginary part, the Wronskian is used otherwise direct recurrece is used  
+        D3[n + 1] = imag(z) > 0 ? D1[n + 1] - im / ĴĤ[n + 1] : -n / z + 1 / (n / z - D3[n]) 
+        #D3[n + 1] = D1[n + 1] - im / ĴĤ[n + 1]   # from the Wronskian ĴₙĤₙ⁽²⁾′ - Ĵₙ′Ĥₙ⁽²⁾ = -j
     end
 
     return D1, D3, ĴĤ
@@ -459,7 +463,14 @@ function sineRatio(z₁, z₂)
     end
 end
 
-
+function riccatiBessel1Scaled(z, D1₁)
+    σ = imag(z) <= 0 ? 1 : -1
+    e = expm1(-2im * σ * z) # exp(-2jσz) - 1
+    s = σ * im * e / 2 # exp(-jσz) sin z
+    d = D1₁ + 1 / z # Ĵ₀/Ĵ₁
+    abs(d) >= 1 && return σ, s / d # Ĵ₁ = sin z / d
+    return σ, s / z - (1 + e / 2)   # Ĵ₁ = sin z/z − cos z
+end
 """
     riccatiBesselRatios(z₁, D1z₁, z₂, D1z₂, nmax::Int)
 
@@ -470,8 +481,10 @@ function riccatiBesselRatios(z₁, D1z₁, z₂, D1z₂, nmax::Int)
 
     Q = Vector{eltype(D1z₁)}(undef, nmax + 1)
     Q[1] = sineRatio(z₁, z₂)
-
-    for n in 1:nmax
+    σ₁, Ĵ₁ˢ = riccatiBessel1Scaled(z₁, D1z₁[2])
+    σ₂, Ĵ₂ˢ = riccatiBessel1Scaled(z₂, D1z₂[2])
+    Q[2] = exp(im * (σ₁ * z₁ - σ₂ * z₂)) * Ĵ₁ˢ / Ĵ₂ˢ  # Ĵ₁(z₁)/Ĵ₁(z₂)
+    for n in 2:nmax
         Q[n + 1] = Q[n] * (D1z₂[n + 1] + n / z₂) / (D1z₁[n + 1] + n / z₁)
     end
 
@@ -537,10 +550,10 @@ function seriesTruncation(sphere::LayeredSphere, excitation::PlaneWave)
 
     N = length(radii)
 
-    x = abs(ω * sqrt(excitation.embedding.ε * excitation.embedding.μ) * radii[N])
+    x = abs(ω * sqrt(complex(excitation.embedding.ε * excitation.embedding.μ)) * radii[N])
 
     for i in 1:N
-        kᵢ = ω * sqrt(fillings[i].ε * fillings[i].μ)
+        kᵢ = ω * sqrt(complex(fillings[i].ε * fillings[i].μ))
 
         x = max(x, abs(kᵢ * radii[i]))
         i > 1 && (x = max(x, abs(kᵢ * radii[i - 1])))
@@ -634,6 +647,11 @@ function rescaledLayerCoefficients(sphere::LayeredSphere, excitation::PlaneWave,
     μ = CT[i <= N ? fillings[i].μ : excitation.embedding.μ for i in 1:(N + 1)]
     k = CT[ω * sqrt(ε[i] * μ[i]) for i in 1:(N + 1)]
 
+    #the statement below is needed for the consistency of the ratios.
+    for i in 1:N
+        imag(k[i]) > 0 && (k[i] = -k[i])
+    end
+
     # logarithmic derivatives and ratios at the interfaces
     D1out = Vector{Vector{CT}}(undef, N)       # at kᵢaᵢ
     D3out = Vector{Vector{CT}}(undef, N)
@@ -662,7 +680,9 @@ function rescaledLayerCoefficients(sphere::LayeredSphere, excitation::PlaneWave,
 
     Ĵ = Vector{CT}(undef, nmax + 1)
     Ĵ[1] = sin(xₑ)
-    for n in 1:nmax
+    σₑ, Ĵ₁ˢ = riccatiBessel1Scaled(xₑ, D1in[N + 1][2])
+    Ĵ[2] = exp(im * σₑ * xₑ) * Ĵ₁ˢ
+    for n in 2:nmax
         Ĵ[n + 1] = Ĵ[n] / (D1in[N + 1][n + 1] + n / xₑ)
     end
 
@@ -814,9 +834,23 @@ function scatteredfield(
     coeffs::RescaledLayerCoefficients{CT},
 ) where {CT}
 
-    T = typeof(excitation.frequency)
     ω = 2π * excitation.frequency
     E₀ = excitation.amplitude
+
+    k₁ = coeffs.k[1]
+    if abs(k₁ * norm(point)) <= eps(real(CT))
+        z₁ = k₁ * coeffs.radii[1]
+        σ, Ĵ₁ˢ = riccatiBessel1Scaled(z₁, coeffs.D1out[1][2])
+        Ĵ₁ = exp(im * σ * z₁) * Ĵ₁ˢ   # Ĵ₁(k₁a₁)
+
+        if quantity isa ElectricField
+            F = E₀ * 2im / 3 * coeffs.cA[1, 1] / Ĵ₁ * SVector{3,CT}(1, 0, 0)
+        else
+            F = E₀ * 2im / 3 * coeffs.cF[1, 1] / Ĵ₁ * SVector{3,CT}(0, 1, 0)
+        end
+
+        return F - field(planeWave(; embedding=excitation.embedding, frequency=excitation.frequency, amplitude=E₀), point, quantity)
+    end
 
     point_sph = cart2sph(point) # [r ϑ φ]
     r = point_sph[1]
@@ -877,23 +911,13 @@ function scatteredfield(
     Fϑ = zero(CT)
     Fϕ = zero(CT)
 
-    # associated Legendre polynomials Pₙ¹(cosϑ) of the orders n - 1 and n
-    Pₙ₋₁ = zero(T)
-    Pₙ = -sinϑ
+    πs, τs = angularFunctions(cosϑ, nmax)
 
     for n in 1:nmax
 
-        # πₙ = Pₙ¹/sinϑ and τₙ = dPₙ¹/dϑ, with their limits on the z-axis
-        if abs(cosϑ) < 0.999999
-            πₙ = Pₙ / sinϑ
-            τₙ = (n * cosϑ * Pₙ - (n + 1) * Pₙ₋₁) / sinϑ
-        elseif cosϑ > 0
-            πₙ = -(n + T(1.0)) * n / T(2.0)
-            τₙ = πₙ
-        else
-            πₙ = (n + T(1.0)) * n / T(2.0) * T(-1.0)^n
-            τₙ = -πₙ
-        end
+        πₙ = πs[n]
+        τₙ = τs[n]
+        Pₙ = sinϑ * πₙ   # associated Legendre polynomial Pₙ¹(cosϑ)
 
         if quantity isa ElectricField
             Fr += cosϕ / (im * x^2) * n * (n + 1) * U_A[n] * Pₙ
@@ -904,8 +928,6 @@ function scatteredfield(
             Fϑ -= sinϕ / r * (U_A[n] / ωμ * πₙ + im / k * dU_F[n] * τₙ)
             Fϕ -= cosϕ / r * (U_A[n] / ωμ * τₙ + im / k * dU_F[n] * πₙ)
         end
-
-        Pₙ₋₁, Pₙ = Pₙ, ((2 * n + 1) * cosϑ * Pₙ - (n + 1) * Pₙ₋₁) / n
     end
 
     F = convertSpherical2Cartesian(E₀ .* SVector{3,CT}(Fr, Fϑ, Fϕ), point_sph)
@@ -919,6 +941,30 @@ end
 
 
 """
+    angularFunctions(cosϑ, nmax::Int)
+
+``πₙ = ((2n - 1) cosϑ πₙ₋₁ - n πₙ₋₂) / (n - 1)``,   ``τₙ = n cosϑ πₙ - (n + 1) πₙ₋₁``,   ``π₀ = 0``, ``π₁ = -1``.
+"""
+function angularFunctions(cosϑ, nmax::Int)
+
+    πs = zeros(typeof(cosϑ), nmax)
+    τs = zeros(typeof(cosϑ), nmax)
+
+    πₙ₋₁ = zero(cosϑ)
+    πₙ = -one(cosϑ)
+
+    for n in 1:nmax
+        πs[n] = πₙ
+        τs[n] = n * cosϑ * πₙ - (n + 1) * πₙ₋₁
+
+        πₙ₋₁, πₙ = πₙ, ((2 * n + 1) * cosϑ * πₙ - (n + 1) * πₙ₋₁) / n
+    end
+
+    return πs, τs
+end
+
+
+"""
     scatteredfield(sphere::LayeredSphere, excitation::PlaneWave, point, quantity::FarField, coeffs::RescaledLayerCoefficients)
 
 Scattered far field in the direction of `point` for the coefficients `coeffs`, for an incident plane wave travelling
@@ -927,31 +973,28 @@ coefficients ``aₙ``, ``bₙ`` of the layered sphere.
 
 The point and the returned field are in Cartesian coordinates.
 """
-function scatteredfield(sphere::LayeredSphere, excitation::PlaneWave, point, quantity::FarField, coeffs::RescaledLayerCoefficients)
-
-    T = typeof(excitation.frequency)
+function scatteredfield(
+    sphere::LayeredSphere, excitation::PlaneWave, point, quantity::FarField, coeffs::RescaledLayerCoefficients{CT}
+) where {CT}
 
     point_sph = cart2sph(point) # [r ϑ φ]
-    r = point_sph[1]
 
-    sinϑ = abs(sin(point_sph[2]))  # note: theta only defined from from 0 to pi
     cosϑ = cos(point_sph[2])
     sinϕ = sin(point_sph[3])
     cosϕ = cos(point_sph[3])
 
-    # first two values of the Associated Legendre Polynomial
-    plm = Vector{T}()
-    push!(plm, -sinϑ)
-    push!(plm, -T(3.0) * sinϑ * cosϑ)
+    k = wavenumber(excitation)
 
-    F = SVector{3,Complex{T}}(0.0, 0.0, 0.0)
+    πs, τs = angularFunctions(cosϑ, coeffs.nmax)
 
+    Fϑ = zero(CT)
+    Fϕ = zero(CT)
+
+    # See Jin, (7.4.44)-(7.4.45), with exp(-jkr)/kr replaced by 1/k, as in Δfieldₙ for the other spheres
     for n in 1:(coeffs.nmax)
-        expansions = expansion(sphere, excitation, quantity, r, plm, cosϑ, sinϑ, n)
-        F += Δfieldₙ(sphere, excitation, quantity, r, (coeffs.aₙ[n], coeffs.bₙ[n]), expansions, sinϕ, cosϕ, n)
-
-        n > 1 && push!(plm, (T(2.0) * n + 1) * cosϑ * plm[n] / n - (n + 1) * plm[n - 1] / n) # recurrence relationship for next associated Legendre polynomials
+        Fϑ += -im * cosϕ / k * im^n * (coeffs.aₙ[n] * τs[n] + coeffs.bₙ[n] * πs[n])
+        Fϕ += +im * sinϕ / k * im^n * (coeffs.aₙ[n] * πs[n] + coeffs.bₙ[n] * τs[n])
     end
 
-    return convertSpherical2Cartesian(excitation.amplitude .* F, point_sph)
+    return convertSpherical2Cartesian(excitation.amplitude .* SVector{3,CT}(0, Fϑ, Fϕ), point_sph)
 end
