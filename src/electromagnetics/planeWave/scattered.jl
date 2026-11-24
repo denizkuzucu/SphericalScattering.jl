@@ -422,9 +422,9 @@ function riccatiLogDerivatives(z::Complex{T}, nmax::Int) where {T}
     ĴĤ[2] = exp(im * (σ - 1) * z) * Ĵ₁ˢ * (im / z - 1)   # Ĵ₁Ĥ₁, Ĥ₁ = e^{-jz}(j/z − 1)
 
     for n in 1:nmax
-        n >= 2 &&(ĴĤ[n + 1] = ĴĤ[n] * (n / z - D3[n]) / (D1[n + 1] + n / z))
+        n >= 2 && (ĴĤ[n + 1] = ĴĤ[n] * (n / z - D3[n]) / (D1[n + 1] + n / z))
         #if ka has a positive imaginary part, the Wronskian is used otherwise direct recurrece is used  
-        D3[n + 1] = imag(z) > 0 ? D1[n + 1] - im / ĴĤ[n + 1] : -n / z + 1 / (n / z - D3[n]) 
+        D3[n + 1] = imag(z) > 0 ? D1[n + 1] - im / ĴĤ[n + 1] : -n / z + 1 / (n / z - D3[n])
         #D3[n + 1] = D1[n + 1] - im / ĴĤ[n + 1]   # from the Wronskian ĴₙĤₙ⁽²⁾′ - Ĵₙ′Ĥₙ⁽²⁾ = -j
     end
 
